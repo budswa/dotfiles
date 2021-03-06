@@ -1,0 +1,303 @@
+#!/bin/sh
+
+#    ____    __
+#   / __/__ / /___ _____
+#  _\ \/ -_) __/ // / _ \
+# /___/\__/\__/\_,_/ .__/
+#                 /_/
+
+# Add description here:
+# > Hello World!
+# > This is my setup script.
+
+
+# Values
+DOTFILES_PATH=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
+
+#. "$DOTFILES_PATH/home/.config/env" # Get your environment variables if you have
+
+STEPS="${*:-install before home root after}" # Default order of steps
+
+#TRASH_PATH="${XDG_DATA_HOME:-$HOME/.local/share}/Trash/files" # Uncomment this if you want to move conflict files to trash instead of delete it
+
+
+# Functions
+install_packages() {
+	printf '\n\033[1;7;34m%s\033[0m\n' 'Install packages'
+	superbbootstrap_install_packages "$DOTFILES_PATH/packageslist" # you can change packageslist's path here
+
+	# Add more packages that you want to install here
+	#printf '\n\033[1;7;34m%s\033[0m\n' 'Install extra packages'
+	#pip install --upgrade 'git+https://github.com/will8211/unimatrix.git'
+}
+
+symlink_home() {
+	printf '\n\033[1;7;36m%s\033[0m\n' "Symlink to home ($HOME)"
+
+	superbbootstrap_batch_symlink "$DOTFILES_PATH/home" "$HOME"
+
+	# Use this if you want to batch symlink with bsymlink
+	#bsymlink "$DOTFILES_PATH/home" "$HOME"
+
+	# Use this if you want to batch symlink with stow (you must cd to the directory that contain this setup file)
+	#stow -vt ~ home
+}
+
+symlink_root() {
+	printf '\n\033[1;7;36m%s\033[0m\n' 'Symlink to root (/)'
+
+	superbbootstrap_batch_symlink "$DOTFILES_PATH/root" '/' "$PERMISSION_COMMAND"
+
+	# Use this if you want to batch symlink with bsymlink
+	#$PERMISSION_COMMAND bsymlink "$DOTFILES_PATH/root" '/'
+
+	# Use this if you want to batch symlink with stow (you must cd to the directory that contain this setup file)
+	#$PERMISSION_COMMAND stow -vt / root
+}
+
+before_symlink() {
+	printf '\n\033[1;7;33m%s\033[0m\n' 'Before symlink step'
+
+	# Remove files that may conflict when symlink dotfiles
+	rm .bashrc
+
+	# Remove conflicting items in $HOME/.config
+	[ -d "$HOME/.config" ] && for config_directory_path in "$HOME/.config/."* "$HOME/.config/"*; do
+		config_directory_name="${config_directory_path#$XDG_CONFIG_HOME/}"
+
+		if [ "$config_directory_name" != '.' ] && [ "$config_directory_name" != '..' ] && [ -e "$HOME/dots/home/.config/$config_directory_name" ]; then
+			rm "$config_directory_path"
+		fi
+	done
+
+	# Create directories (to symlink files inside only, not the directory itself)
+	mkdir "$HOME/.config" "$HOME/.local/share" "$HOME/.local/bin" "$HOME/.cache"
+}
+
+after_symlink() {
+	printf '\n\033[1;7;33m%s\033[0m\n' 'After symlink step'
+
+	# Change default shell
+	chsh -s '/usr/bin/bash'
+
+	# Enable firewall
+	$PERMISSION_COMMAND ufw enable
+}
+
+
+# SBB #########################################################################
+
+# WARNING !!!
+# Don't touch anything from this point to the end of file
+# if you don't know what you are doing.
+
+
+# Values
+WD="$PWD"
+
+TMPDIR="${TMPDIR:-/tmp}"
+TEMPORARY="$TMPDIR/superb-bootstrap"
+
+PERMISSION_COMMAND='sudo' # You can change this to doas
+
+     APT_MARK='APT';      APT_PM='apt'         ;      APT_COMMAND="$PERMISSION_COMMAND $APT_PM install --assume-yes"
+  Pacman_MARK='PAC';   Pacman_PM='pacman'      ;   Pacman_COMMAND="$PERMISSION_COMMAND $Pacman_PM --sync --noconfirm --needed"
+ Portage_MARK='PTG';  Portage_PM='emerge'      ;  Portage_COMMAND="$PERMISSION_COMMAND $Portage_PM"
+    XBPS_MARK='XBP';     XBPS_PM='xbps-install';     XBPS_COMMAND="$PERMISSION_COMMAND $XBPS_PM --yes"
+  Zypper_MARK='ZPR';   Zypper_PM='zypper'      ;   Zypper_COMMAND="$PERMISSION_COMMAND $Zypper_PM --non-interactive install"
+     AUR_MARK='AUR';      AUR_PM='paru'        ;      AUR_COMMAND="$AUR_PM --sync --skipreview --useask --noconfirm"
+ Flatpak_MARK='FLA';  Flatpak_PM='flatpak'     ;  Flatpak_COMMAND="$PERMISSION_COMMAND $Flatpak_PM install"
+Homebrew_MARK='HBR'; Homebrew_PM='brew'        ; Homebrew_COMMAND="$Homebrew_PM install"
+    Snap_MARK='SNA';     Snap_PM='snap'        ;     Snap_COMMAND="$PERMISSION_COMMAND $Snap_PM install"
+
+case $(uname -s | sed -e 's/[[:upper:]]/\L&/g') in
+	'darwin'*)
+		PACKAGEMANAGER_MAIN='Homebrew'
+	;;
+	*)
+		for packagemanager_check in 'APT' 'Pacman' 'Portage' 'XBPS' 'Zypper'; do
+			eval "command -v \"\$${packagemanager_check}_PM\" >/dev/null" && {
+				PACKAGEMANAGER_MAIN="$packagemanager_check"
+				break
+			}
+		done
+
+		if [ -z "$PACKAGEMANAGER_MAIN" ]; then
+			printf '\n\033[1;7;31m%s\033[0m\n' "Packages manager not found"
+			exit 1
+		fi
+
+		[ "$PACKAGEMANAGER_MAIN"  = 'Pacman' ] && PACKAGEMANAGER_LIST="$PACKAGEMANAGER_LIST AUR"
+		                                          PACKAGEMANAGER_LIST="$PACKAGEMANAGER_LIST Flatpak"
+		[ "$PACKAGEMANAGER_MAIN" != 'XBPS'   ] && PACKAGEMANAGER_LIST="$PACKAGEMANAGER_LIST Snap"
+	;;
+esac
+
+PACKAGEMANAGER_LIST="$PACKAGEMANAGER_MAIN $PACKAGEMANAGER_LIST"
+
+
+# Functions
+superbbootstrap_install_packages() {
+	if [ -f "$1" ]; then
+		packages_list=$(sed -e 's/#.*$//g' "$1")
+	else
+		printf '\n\033[1;7;31m%s\033[0m\n' 'Packages list not found'
+		exit 1
+	fi
+
+	for packagemanager in $PACKAGEMANAGER_LIST; do
+		eval "mark=\"\$${packagemanager}_MARK\""
+		eval "install_command=\"\$${packagemanager}_COMMAND\""
+
+		packages_installing=$(printf '%s' "$packages_list" | sed -e "s/^.*$mark://g" -e 's/[[:space:]].*$//g' -e '/^$/d' | tr '\n' ' ')
+
+		[ -n "$packages_installing" ] && {
+			packages_list=$(printf '%s' "$packages_list" | sed -e "s/^.*$mark.*\$//g")
+
+			printf '\n\033[1;7;35m%s\033[0m\n' "Setting up $packagemanager"
+			eval "superbbootstrap_$packagemanager"
+
+			printf '\n\033[1;7;32m%s\033[0m\n' "Installing $packagemanager Packages"
+			eval "$install_command $packages_installing"
+		}
+	done
+}
+
+superbbootstrap_APT() {
+	$PERMISSION_COMMAND apt update  --assume-yes
+	$PERMISSION_COMMAND apt upgrade --assume-yes
+}
+
+superbbootstrap_Portage() {
+    $PERMISSION_COMMAND emerge --sync
+    $PERMISSION_COMMAND emerge --update --newuse --deep --with-bdeps=y @world
+}
+
+superbbootstrap_Pacman() {
+	$PERMISSION_COMMAND pacman --sync --sysupgrade --refresh --noconfirm --needed
+}
+
+superbbootstrap_XBPS() {
+	$PERMISSION_COMMAND xbps-install --sync --yes --update # Update XBPS itself so it can update other packages
+	$PERMISSION_COMMAND xbps-install --sync --yes --update # Update packages
+	$PERMISSION_COMMAND xbps-install --sync --yes void-repo-nonfree void-repo-multilib void-repo-multilib-nonfree void-repo-debug
+}
+
+superbbootstrap_Zypper() {
+    $PERMISSION_COMMAND zypper --non-interactive update
+}
+
+superbbootstrap_AUR() {
+	if ! command -v 'paru' >/dev/null; then
+		$PERMISSION_COMMAND pacman --sync --noconfirm --needed git base-devel
+		git clone 'https://aur.archlinux.org/paru.git' "$TEMPORARY/paru"
+		cd "$TEMPORARY/paru" || exit 1
+		makepkg -si
+		cd "$WD" || exit 1
+	else
+		printf '%s\n' "Paru has been installed"
+	fi
+}
+
+superbbootstrap_Flatpak() {
+	if ! command -v 'flatpak' >/dev/null; then
+		case "$PACKAGEMANAGER_MAIN" in
+			'APT')         $APT_COMMAND flatpak gnome-software-plugin-flatpak ;;
+			'Portage') $Portage_COMMAND sys-apps/flatpak                      ;;
+			'Pacman')   $Pacman_COMMAND flatpak                               ;;
+			'XBPS')       $XBPS_COMMAND flatpak                               ;;
+			'Zypper')   $Zypper_COMMAND flatpak                               ;;
+		esac
+	else
+		printf '%s\n' "Flatpak has been installed"
+	fi
+
+	flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+}
+
+superbbootstrap_Snap() {
+	if ! command -v 'snap' >/dev/null; then
+		if [ $PACKAGEMANAGER_MAIN = 'Pacman' ]; then
+			$PERMISSION_COMMAND pacman --sync --noconfirm --needed git
+			git clone 'https://aur.archlinux.org/snapd.git' "$TEMPORARY/snap"
+			cd "$TEMPORARY/snap" || exit 1
+			makepkg -si
+			cd "$WD" || exit 1
+			$PERMISSION_COMMAND systemctl enable --now snapd.socket
+			$PERMISSION_COMMAND ln -s '/var/lib/snapd/snap' '/snap'
+		elif [ $PACKAGEMANAGER_MAIN = 'APT' ]; then
+			$PERMISSION_COMMAND apt install --assume-yes snapd
+		fi
+	else
+		printf '%s\n' "Snapd has been installed"
+	fi
+
+	snap install core
+}
+
+superbbootstrap_Homebrew() {
+	if ! command -v 'brew' >/dev/null; then
+		/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+	else
+		printf '%s\n' "Homebrew has been installed"
+	fi
+}
+
+superbbootstrap_batch_symlink() {
+	batch_symlink_directory="$1"
+	batch_symlink_target="$2"
+	batch_symlink_permission="$3"
+
+	[ -n "$TRASH_PATH" ] && mkdir -p "$TRASH_PATH"
+
+	if [ -d "$1" ]; then
+		superbbootstrap_scan_directory "$batch_symlink_directory"
+	else
+		printf '\n\033[1;7;31m%s\033[0m\n' "'$batch_symlink_directory' not found"
+	fi
+}
+
+superbbootstrap_scan_directory() {
+	[ -d "$1" ] || exit 1
+
+	for file in "$1"/.* "$1"/*; do
+		[ "$file" = "$1/." ] || [ "$file" = "$1/.." ] || [ "$file" = "$1/*" ] && continue
+
+		target="$batch_symlink_target${file#$batch_symlink_directory}"
+
+		if [ -e "$target" ]; then
+			if [ -d "$target" ] && [ ! -h "$target" ]; then
+				superbbootstrap_scan_directory "$file"
+			else
+				if [ -n "$TRASH_PATH" ]; then
+					$batch_symlink_permission mv -f "$target" "$TRASH_PATH"
+				else
+					$batch_symlink_permission rm "$target"
+				fi && $batch_symlink_permission ln -sf "$file" "$target"
+			fi
+		else
+			$batch_symlink_permission ln -sf "$file" "$target"
+		fi
+	done
+}
+
+
+# Start
+for step_check in $STEPS; do
+	case "$step_check" in
+		'i'|'install') steps_list="${steps_list:+$steps_list; }install_packages" ;;
+		'b'|'before')  steps_list="${steps_list:+$steps_list; }before_symlink"   ;;
+		'h'|'home')    steps_list="${steps_list:+$steps_list; }symlink_home"     ;;
+		'r'|'root')    steps_list="${steps_list:+$steps_list; }symlink_root"     ;;
+		'a'|'after')   steps_list="${steps_list:+$steps_list; }after_symlink"    ;;
+		*)
+			printf '\n\033[1;7;31m%s\033[0m\n' "Step '$step_check' not found"
+			exit 1
+		;;
+	esac
+done
+
+eval "$steps_list"
+
+
+exit 0
